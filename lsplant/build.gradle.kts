@@ -3,7 +3,6 @@ import java.nio.file.Paths
 plugins {
     id("com.android.library")
     id("maven-publish")
-    id("signing")
 }
 
 val androidTargetSdkVersion: Int by rootProject.extra
@@ -177,15 +176,20 @@ publishing {
     publications {
         fun MavenPublication.setup() {
             group = "org.lsposed.lsplant"
-            version = "5.2"
+            artifactId = "lsplant"
+            version = "5.2-aliucord.1"
+            afterEvaluate {
+                from(components.getByName("release"))
+                artifact(symbolsTask)
+            }
             pom {
                 name.set("LSPlant")
                 description.set("A hook framework for Android Runtime (ART)")
-                url.set("https://github.com/LSPosed/LSPlant")
+                url.set("https://github.com/Aliucord/LSPlant")
                 licenses {
                     license {
                         name.set("GNU Lesser General Public License v3.0")
-                        url.set("https://github.com/LSPosed/LSPlant/blob/master/LICENSE")
+                        url.set("https://github.com/Aliucord/LSPlant/blob/master/LICENSE")
                     }
                 }
                 developers {
@@ -195,8 +199,8 @@ publishing {
                     }
                 }
                 scm {
-                    connection.set("scm:git:https://github.com/LSPosed/LSPlant.git")
-                    url.set("https://github.com/LSPosed/LSPlant")
+                    connection.set("scm:git:https://github.com/Aliucord/LSPlant.git")
+                    url.set("https://github.com/Aliucord/LSPlant")
                 }
             }
         }
@@ -218,30 +222,19 @@ publishing {
         }
     }
     repositories {
-        maven {
-            name = "ossrh"
-            url = uri("https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/")
-            credentials(PasswordCredentials::class)
-        }
-        maven {
-            name = "GitHubPackages"
-            url = uri("https://maven.pkg.github.com/LSPosed/LSPlant")
-            credentials {
-                username = System.getenv("GITHUB_ACTOR")
-                password = System.getenv("GITHUB_TOKEN")
-            }
-        }
-    }
-    dependencies {
-         "standaloneCompileOnly"("dev.rikka.ndk.thirdparty:cxx:1.2.0")
-    }
-}
+        val username = System.getenv("MAVEN_USERNAME")
+        val password = System.getenv("MAVEN_PASSWORD")
 
-signing {
-    val signingKey = findProperty("signingKey") as String?
-    val signingPassword = findProperty("signingPassword") as String?
-    if (signingKey != null && signingPassword != null) {
-        useInMemoryPgpKeys(signingKey, signingPassword)
+        if (username != null && password != null) {
+            maven {
+                credentials {
+                    this.username = username
+                    this.password = password
+                }
+                setUrl("https://maven.aliucord.com/snapshots")
+            }
+        } else {
+            mavenLocal()
+        }
     }
-    sign(publishing.publications)
 }
