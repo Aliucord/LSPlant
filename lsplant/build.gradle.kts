@@ -4,7 +4,6 @@ plugins {
     alias(libs.plugins.lsplugin.publish)
     alias(libs.plugins.lsplugin.cmaker)
     `maven-publish`
-    signing
 }
 
 val androidTargetSdkVersion: Int by rootProject.extra
@@ -125,15 +124,20 @@ publish {
     publications {
         fun MavenPublication.setup() {
             group = "org.lsposed.lsplant"
-            version = ver
+            artifactId = "lsplant"
+            version = "6.3-aliucord.1"
+            afterEvaluate {
+                from(components.getByName("release"))
+                artifact(symbolsTask)
+            }
             pom {
                 name.set("LSPlant")
                 description.set("A hook framework for Android Runtime (ART)")
-                url.set("https://github.com/LSPosed/LSPlant")
+                url.set("https://github.com/Aliucord/LSPlant")
                 licenses {
                     license {
                         name.set("GNU Lesser General Public License v3.0")
-                        url.set("https://github.com/LSPosed/LSPlant/blob/master/LICENSE")
+                        url.set("https://github.com/Aliucord/LSPlant/blob/master/LICENSE")
                     }
                 }
                 developers {
@@ -143,8 +147,8 @@ publish {
                     }
                 }
                 scm {
-                    connection.set("scm:git:https://github.com/LSPosed/LSPlant.git")
-                    url.set("https://github.com/LSPosed/LSPlant")
+                    connection.set("scm:git:https://github.com/Aliucord/LSPlant.git")
+                    url.set("https://github.com/Aliucord/LSPlant")
                 }
             }
         }
@@ -163,6 +167,22 @@ publish {
                 artifact(symbolsStandaloneTask)
             }
             setup()
+        }
+    }
+    repositories {
+        val username = System.getenv("MAVEN_USERNAME")
+        val password = System.getenv("MAVEN_PASSWORD")
+
+        if (username != null && password != null) {
+            maven {
+                credentials {
+                    this.username = username
+                    this.password = password
+                }
+                setUrl("https://maven.aliucord.com/snapshots")
+            }
+        } else {
+            mavenLocal()
         }
     }
 }
