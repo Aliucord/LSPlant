@@ -112,7 +112,7 @@ publishing {
         register<MavenPublication>("lsplant") {
             group = "org.lsposed.lsplant"
             artifactId = "lsplant"
-            version = "4.0-aliucord.1"
+            version = "4.0-aliucord.2"
             afterEvaluate {
                 from(components.getByName("release"))
                 artifact(symbolsTask)
