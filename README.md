@@ -27,6 +27,10 @@ repositories {
     mavenCentral()
 }
 
+dependencies {
+    implementation "org.lsposed.lsplant:lsplant:5.2"
+}
+
 android {
     buildFeatures {
         prefab true
