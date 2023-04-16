@@ -64,31 +64,22 @@ private:
                                (art::ClassLinker * thiz, art::Thread *self, art::ArtMethod *method),
                                { return backup(thiz, self, MayGetBackup(method)); });
 
-    static auto GetBackupMethods(mirror::Class *mirror_class) {
-        std::list<std::tuple<art::ArtMethod *, void *>> out;
-        auto class_def = mirror_class->GetClassDef();
-        if (!class_def) return out;
-        std::shared_lock lk(hooked_classes_lock_);
-        if (auto found = hooked_classes_.find(class_def); found != hooked_classes_.end())
-            [[unlikely]] {
-            LOGD("Before fixup %s, backup hooked methods' trampoline",
-                 mirror_class->GetDescriptor().c_str());
-            for (auto method : found->second) {
-                out.emplace_back(method, method->GetEntryPoint());
-            }
-        }
-        return out;
-    }
-
-    static void FixTrampoline(const std::list<std::tuple<art::ArtMethod *, void *>> &methods) {
-        std::shared_lock lk(hooked_methods_lock_);
+    static auto RestoreBackup(const dex::ClassDef *class_def, art::Thread *self) {
+        auto methods = mirror::Class::PopBackup(class_def, self);
         for (const auto &[art_method, old_trampoline] : methods) {
+            auto new_trampoline = art_method->GetEntryPoint();
+            art_method->SetEntryPoint(old_trampoline);
+            if (IsDeoptimized(art_method)) {
+                if (new_trampoline != old_trampoline) [[unlikely]] {
+                    LOGV("prevent deoptimized method %s from being overwritten",
+                         art_method->PrettyMethod(true).data());
+                }
+                continue;
+            }
             if (auto backup_method = IsHooked(art_method); backup_method) [[likely]] {
-                if (auto new_trampoline = art_method->GetEntryPoint();
-                    new_trampoline != old_trampoline) [[unlikely]] {
+                if (new_trampoline != old_trampoline) [[unlikely]] {
                     LOGV("propagate entrypoint for %s", backup_method->PrettyMethod(true).data());
                     backup_method->SetEntryPoint(new_trampoline);
-                    art_method->SetEntryPoint(old_trampoline);
                 }
             }
         }
@@ -97,27 +88,31 @@ private:
     CREATE_MEM_HOOK_STUB_ENTRY(
         "_ZN3art11ClassLinker22FixupStaticTrampolinesENS_6ObjPtrINS_6mirror5ClassEEE", void,
         FixupStaticTrampolines, (ClassLinker * thiz, ObjPtr<mirror::Class> mirror_class), {
-            auto backup_methods = GetBackupMethods(mirror_class);
             backup(thiz, mirror_class);
-            FixTrampoline(backup_methods);
+            RestoreBackup(mirror_class->GetClassDef(), nullptr);
         });
 
     CREATE_MEM_HOOK_STUB_ENTRY(
         "_ZN3art11ClassLinker22FixupStaticTrampolinesEPNS_6ThreadENS_6ObjPtrINS_6mirror5ClassEEE",
         void, FixupStaticTrampolinesWithThread,
         (ClassLinker * thiz, art::Thread *self, ObjPtr<mirror::Class> mirror_class), {
-            auto backup_methods = GetBackupMethods(mirror_class);
             backup(thiz, self, mirror_class);
-            FixTrampoline(backup_methods);
+            RestoreBackup(mirror_class->GetClassDef(), self);
         });
 
     CREATE_MEM_HOOK_STUB_ENTRY("_ZN3art11ClassLinker22FixupStaticTrampolinesEPNS_6mirror5ClassE",
                                void, FixupStaticTrampolinesRaw,
                                (ClassLinker * thiz, mirror::Class *mirror_class), {
-                                   auto backup_methods = GetBackupMethods(mirror_class);
                                    backup(thiz, mirror_class);
-                                   FixTrampoline(backup_methods);
+                                   RestoreBackup(mirror_class->GetClassDef(), nullptr);
                                });
+
+    CREATE_MEM_HOOK_STUB_ENTRY(
+        "_ZN3art11ClassLinker26VisiblyInitializedCallback29AdjustThreadVisibilityCounterEPNS_6ThreadEl",
+        void, AdjustThreadVisibilityCounter, (void *thiz, art::Thread *self, ssize_t adjustment), {
+            backup(thiz, self, adjustment);
+            RestoreBackup(nullptr, self);
+        });
 
 public:
     static bool Init(const HookHandler &handler) {
@@ -131,6 +126,13 @@ public:
             !HookSyms(handler, UnregisterNativeClassLinker, UnregisterNative, UnregisterNativeFast,
                       UnregisterNativeThread)) {
             return false;
+        }
+
+        int sdk_int = GetAndroidApiLevel();
+
+        if (sdk_int >= __ANDROID_API_R__) {
+            // fixup static trampoline may have been inlined
+            HookSyms(handler, AdjustThreadVisibilityCounter);
         }
 
         if (!RETRIEVE_MEM_FUNC_SYMBOL(
@@ -159,9 +161,14 @@ public:
         // Android 13
         if (art_quick_to_interpreter_bridgeSym && art_quick_generic_jni_trampolineSym) [[likely]] {
             if (art_method->GetAccessFlags() & ArtMethod::kAccNative) [[unlikely]] {
+                LOGV("deoptimize native method %s from %p to %p",
+                     art_method->PrettyMethod(true).data(), art_method->GetEntryPoint(),
+                     art_quick_generic_jni_trampolineSym);
                 art_method->SetEntryPoint(
                     reinterpret_cast<void *>(art_quick_generic_jni_trampolineSym));
             } else {
+                LOGV("deoptimize method %s from %p to %p", art_method->PrettyMethod(true).data(),
+                     art_method->GetEntryPoint(), art_quick_to_interpreter_bridgeSym);
                 art_method->SetEntryPoint(
                     reinterpret_cast<void *>(art_quick_to_interpreter_bridgeSym));
             }

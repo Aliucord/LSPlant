@@ -85,6 +85,9 @@ jmethodID load_class = nullptr;
 jmethodID set_accessible = nullptr;
 jclass executable = nullptr;
 
+// for proxy method
+jmethodID method_get_parameter_types = nullptr;
+jmethodID method_get_return_type = nullptr;
 // for old platform
 jclass path_class_loader = nullptr;
 jmethodID path_class_loader_init = nullptr;
@@ -134,7 +137,19 @@ bool InitJNI(JNIEnv *env) {
     if (method_get_declaring_class =
             JNI_GetMethodID(env, executable, "getDeclaringClass", "()Ljava/lang/Class;");
         !method_get_declaring_class) {
-        LOGE("Failed to find getName method");
+        LOGE("Failed to find getDeclaringClass method");
+        return false;
+    }
+    if (method_get_parameter_types =
+            JNI_GetMethodID(env, executable, "getParameterTypes", "()[Ljava/lang/Class;");
+        !method_get_parameter_types) {
+        LOGE("Failed to find getParameterTypes method");
+        return false;
+    }
+    if (method_get_return_type =
+            JNI_GetMethodID(env, JNI_FindClass(env, "java/lang/reflect/Method"), "getReturnType", "()Ljava/lang/Class;");
+        !method_get_return_type) {
+        LOGE("Failed to find getReturnType method");
         return false;
     }
     auto clazz = JNI_FindClass(env, "java/lang/Class");
@@ -269,7 +284,7 @@ bool InitNative(JNIEnv *env, const HookHandler &handler) {
     if (IsJavaDebuggable(env)) {
         // Make the runtime non-debuggable as a workaround
         // when ShouldUseInterpreterEntrypoint inlined
-        Runtime::Current()->SetJavaDebuggable(false);
+        Runtime::Current()->SetJavaDebuggable(Runtime::RuntimeDebugState::kNonJavaDebuggable);
     }
     return true;
 }
@@ -484,12 +499,12 @@ bool DoHook(ArtMethod *target, ArtMethod *hook, ArtMethod *backup) {
     LOGV("Hooking: target = %s(%p), hook = %s(%p), backup = %s(%p)", target->PrettyMethod().c_str(),
          target, hook->PrettyMethod().c_str(), hook, backup->PrettyMethod().c_str(), backup);
 
-    if (auto *trampoline = GenerateTrampolineFor(hook); !trampoline) {
+    if (auto *entrypoint = GenerateTrampolineFor(hook); !entrypoint) {
         LOGE("Failed to generate trampoline");
         return false;
         // NOLINTNEXTLINE
     } else {
-        LOGV("Generated trampoline %p", trampoline);
+        LOGV("Generated trampoline %p", entrypoint);
 
         target->SetNonCompilable();
         hook->SetNonCompilable();
@@ -499,7 +514,7 @@ bool DoHook(ArtMethod *target, ArtMethod *hook, ArtMethod *backup) {
 
         target->ClearFastInterpretFlag();
 
-        target->SetEntryPoint(trampoline);
+        target->SetEntryPoint(entrypoint);
 
         if (!backup->IsStatic()) backup->SetPrivate();
 
@@ -523,6 +538,68 @@ bool DoUnHook(ArtMethod *target, ArtMethod *backup) {
          target->GetAccessFlags(), target->GetEntryPoint(), backup, backup->GetAccessFlags(),
          backup->GetEntryPoint());
     return true;
+}
+
+std::string GetProxyMethodShorty(JNIEnv *env, jobject proxy_method) {
+    const auto return_type = JNI_CallObjectMethod(env, proxy_method, method_get_return_type);
+    const auto parameter_types =
+        JNI_Cast<jobjectArray>(JNI_CallObjectMethod(env, proxy_method, method_get_parameter_types));
+    auto integer_class = JNI_FindClass(env, "java/lang/Integer");
+    auto long_class = JNI_FindClass(env, "java/lang/Long");
+    auto float_class = JNI_FindClass(env, "java/lang/Float");
+    auto double_class = JNI_FindClass(env, "java/lang/Double");
+    auto boolean_class = JNI_FindClass(env, "java/lang/Boolean");
+    auto byte_class = JNI_FindClass(env, "java/lang/Byte");
+    auto char_class = JNI_FindClass(env, "java/lang/Character");
+    auto short_class = JNI_FindClass(env, "java/lang/Short");
+    auto void_class = JNI_FindClass(env, "java/lang/Void");
+    static auto *kIntTypeField =
+        JNI_GetStaticFieldID(env, integer_class, "TYPE", "Ljava/lang/Class;");
+    static auto *kLongTypeField =
+        JNI_GetStaticFieldID(env, long_class, "TYPE", "Ljava/lang/Class;");
+    static auto *kFloatTypeField =
+        JNI_GetStaticFieldID(env, float_class, "TYPE", "Ljava/lang/Class;");
+    static auto *kDoubleTypeField =
+        JNI_GetStaticFieldID(env, double_class, "TYPE", "Ljava/lang/Class;");
+    static auto *kBooleanTypeField =
+        JNI_GetStaticFieldID(env, boolean_class, "TYPE", "Ljava/lang/Class;");
+    static auto *kByteTypeField =
+        JNI_GetStaticFieldID(env, byte_class, "TYPE", "Ljava/lang/Class;");
+    static auto *kCharTypeField =
+        JNI_GetStaticFieldID(env, char_class, "TYPE", "Ljava/lang/Class;");
+    static auto *kShortTypeField =
+        JNI_GetStaticFieldID(env, short_class, "TYPE", "Ljava/lang/Class;");
+    static auto *kVoidTypeField =
+        JNI_GetStaticFieldID(env, void_class, "TYPE", "Ljava/lang/Class;");
+
+    auto int_type = JNI_GetStaticObjectField(env, integer_class, kIntTypeField);
+    auto long_type = JNI_GetStaticObjectField(env, long_class, kLongTypeField);
+    auto float_type = JNI_GetStaticObjectField(env, float_class, kFloatTypeField);
+    auto double_type = JNI_GetStaticObjectField(env, double_class, kDoubleTypeField);
+    auto boolean_type = JNI_GetStaticObjectField(env, boolean_class, kBooleanTypeField);
+    auto byte_type = JNI_GetStaticObjectField(env, byte_class, kByteTypeField);
+    auto char_type = JNI_GetStaticObjectField(env, char_class, kCharTypeField);
+    auto short_type = JNI_GetStaticObjectField(env, short_class, kShortTypeField);
+    auto void_type = JNI_GetStaticObjectField(env, void_class, kVoidTypeField);
+
+    std::string out;
+    auto type_to_shorty = [&](const ScopedLocalRef<jobject> &type) {
+        if (env->IsSameObject(type, int_type)) return 'I';
+        if (env->IsSameObject(type, long_type)) return 'J';
+        if (env->IsSameObject(type, float_type)) return 'F';
+        if (env->IsSameObject(type, double_type)) return 'D';
+        if (env->IsSameObject(type, boolean_type)) return 'Z';
+        if (env->IsSameObject(type, byte_type)) return 'B';
+        if (env->IsSameObject(type, char_type)) return 'C';
+        if (env->IsSameObject(type, short_type)) return 'S';
+        if (env->IsSameObject(type, void_type)) return 'V';
+        return 'L';
+    };
+    out += type_to_shorty(return_type);
+    for (const auto &param : parameter_types) {
+        out += type_to_shorty(param);
+    }
+    return out;
 }
 
 }  // namespace
@@ -584,7 +661,9 @@ using ::lsplant::IsHooked;
         }
         std::tie(built_class, hooker_field, hook_method, backup_method) = WrapScope(
             env,
-            BuildDex(env, callback_class_loader, ArtMethod::GetMethodShorty(env, target_method),
+            BuildDex(env, callback_class_loader,
+                     __builtin_expect(is_proxy, 0) ? GetProxyMethodShorty(env, target_method)
+                                                   : ArtMethod::GetMethodShorty(env, target_method),
                      is_static, target->IsConstructor() ? "constructor" : target_method_name.get(),
                      class_name.get(), callback_method_name.get()));
         if (!built_class || !hooker_field || !hook_method || !backup_method) {
@@ -609,6 +688,10 @@ using ::lsplant::IsHooked;
         if (!is_proxy) [[likely]] {
             RecordJitMovement(target, backup);
         }
+        // Always record backup as deoptimized since we dont want its entrypoint to be updated
+        // by FixupStaticTrampolines on hooker class
+        // Used hook's declaring class here since backup's is no longer the same with hook's
+        RecordDeoptimized(hook->GetDeclaringClass()->GetClassDef(), backup);
         return global_backup;
     }
 
@@ -631,8 +714,8 @@ using ::lsplant::IsHooked;
                 LOGE("Unable to unhook a method that is not hooked");
                 return false;
             }
-            hooked_methods_.erase(it);
             hooked_methods_.erase(it->second.second);
+            hooked_methods_.erase(it);
         }
     }
     {
@@ -664,6 +747,8 @@ using ::lsplant::IsHooked;
         return false;
     }
     auto *art_method = ArtMethod::FromReflectedMethod(env, method);
+    // record the original but not the backup
+    RecordDeoptimized(art_method->GetDeclaringClass()->GetClassDef(), art_method);
     if (auto *backup = IsHooked(art_method); backup) {
         art_method = backup;
     }
@@ -706,8 +791,13 @@ using ::lsplant::IsHooked;
 
 [[maybe_unused]] bool MakeDexFileTrusted(JNIEnv *env, jobject cookie) {
     struct Guard {
-        Guard() { Runtime::Current()->SetJavaDebuggable(true); }
-        ~Guard() { Runtime::Current()->SetJavaDebuggable(false); }
+        Guard() {
+            Runtime::Current()->SetJavaDebuggable(
+                Runtime::RuntimeDebugState::kJavaDebuggableAtInit);
+        }
+        ~Guard() {
+            Runtime::Current()->SetJavaDebuggable(Runtime::RuntimeDebugState::kNonJavaDebuggable);
+        }
     } guard;
     if (!cookie) return false;
     return DexFile::SetTrusted(env, cookie);
