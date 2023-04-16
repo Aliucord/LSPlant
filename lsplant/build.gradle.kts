@@ -232,4 +232,7 @@ publishing {
             mavenLocal()
         }
     }
+    dependencies {
+        "standaloneCompileOnly"("dev.rikka.ndk.thirdparty:cxx:1.2.0")
+    }
 }
