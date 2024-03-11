@@ -1,8 +1,8 @@
 #include <dobby.h>
 #include <lsplant.hpp>
 #include <sys/mman.h>
-#include "elf_util.h"
 #include "logging.h"
+#include "elf_util.h"
 
 #define _uintval(p)               reinterpret_cast<uintptr_t>(p)
 #define _ptr(p)                   reinterpret_cast<void *>(p)
@@ -55,7 +55,10 @@ JNI_OnLoad(JavaVM* vm, void* reserved) {
     if (vm->GetEnv((void**) &env, JNI_VERSION_1_6) != JNI_OK) {
         return JNI_ERR;
     }
-    SandHook::ElfImg art("libart.so");
+    SandHook::ElfImg art("/libart.so");
+#if !defined(__i386__)
+    dobby_enable_near_branch_trampoline();
+#endif
     lsplant::InitInfo initInfo{
             .inline_hooker = InlineHooker,
             .inline_unhooker = InlineUnhooker,

@@ -3,8 +3,9 @@
 #include <jni.h>
 
 #include <string_view>
+#include <functional>
 
-/// \namespace namespace of LSPlant
+/// \namespace lsplant
 namespace lsplant {
 
 inline namespace v2 {

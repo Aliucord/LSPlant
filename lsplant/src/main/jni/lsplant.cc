@@ -64,10 +64,16 @@ consteval inline auto GetTrampoline() {
                                // NOLINTNEXTLINE
                                uint8_t{56u}, uintptr_t{1u});
     }
-    if constexpr (kArch == Arch::kX8664) {
+    if constexpr (kArch == Arch::kX86_64) {
         return std::make_tuple("\x48\xbf\x78\x56\x34\x12\x78\x56\x34\x12\xff\x77\x00\xc3"_uarr,
                                // NOLINTNEXTLINE
                                uint8_t{96u}, uintptr_t{2u});
+    }
+    if constexpr (kArch == Arch::kRiscv64) {
+        return std::make_tuple(
+            "\x17\x05\x00\x00\x03\x35\xc5\x00\x67\x00\x05\x00\x78\x56\x34\x12\x78\x56\x34\x12"_uarr,
+            // NOLINTNEXTLINE
+            uint8_t{84u}, uintptr_t{12u});
     }
 }
 
@@ -79,8 +85,8 @@ jmethodID class_get_name = nullptr;
 jmethodID class_get_class_loader = nullptr;
 jmethodID class_get_declared_constructors = nullptr;
 jfieldID class_access_flags = nullptr;
-jclass in_memory_class_loader = nullptr;
-jmethodID in_memory_class_loader_init = nullptr;
+jmethodID dex_file_init_with_cl = nullptr;
+jmethodID dex_file_init = nullptr;
 jmethodID load_class = nullptr;
 jmethodID set_accessible = nullptr;
 jclass executable = nullptr;
@@ -89,7 +95,6 @@ jclass executable = nullptr;
 jmethodID method_get_parameter_types = nullptr;
 jmethodID method_get_return_type = nullptr;
 // for old platform
-jclass path_class_loader = nullptr;
 jmethodID path_class_loader_init = nullptr;
 
 std::string generated_class_name;
@@ -147,7 +152,8 @@ bool InitJNI(JNIEnv *env) {
         return false;
     }
     if (method_get_return_type =
-            JNI_GetMethodID(env, JNI_FindClass(env, "java/lang/reflect/Method"), "getReturnType", "()Ljava/lang/Class;");
+            JNI_GetMethodID(env, JNI_FindClass(env, "java/lang/reflect/Method"), "getReturnType",
+                            "()Ljava/lang/Class;");
         !method_get_return_type) {
         LOGE("Failed to find getReturnType method");
         return false;
@@ -182,32 +188,37 @@ bool InitJNI(JNIEnv *env) {
         LOGE("Failed to find Class.accessFlags");
         return false;
     }
-    if (sdk_int >= __ANDROID_API_O__ &&
-        (in_memory_class_loader = JNI_NewGlobalRef(
-             env, JNI_FindClass(env, "dalvik/system/InMemoryDexClassLoader")))) [[likely]] {
-        in_memory_class_loader_init =
-            JNI_GetMethodID(env, in_memory_class_loader, "<init>",
-                            "(Ljava/nio/ByteBuffer;Ljava/lang/ClassLoader;)V");
-        load_class = JNI_GetMethodID(env, in_memory_class_loader, "loadClass",
-                                     "(Ljava/lang/String;)Ljava/lang/Class;");
-        if (!load_class) {
-            load_class = JNI_GetMethodID(env, in_memory_class_loader, "findClass",
-                                         "(Ljava/lang/String;)Ljava/lang/Class;");
-        }
-    } else if (auto dex_file = JNI_FindClass(env, "dalvik/system/DexFile");
-               dex_file && (path_class_loader = JNI_NewGlobalRef(
-                                env, JNI_FindClass(env, "dalvik/system/PathClassLoader")))) {
-        path_class_loader_init = JNI_GetMethodID(env, path_class_loader, "<init>",
-                                                 "(Ljava/lang/String;Ljava/lang/ClassLoader;)V");
-        if (!path_class_loader_init) {
-            LOGE("Failed to find PathClassLoader.<init>");
-            return false;
-        }
-        load_class =
-            JNI_GetMethodID(env, dex_file, "loadClass",
-                            "(Ljava/lang/String;Ljava/lang/ClassLoader;)Ljava/lang/Class;");
+    auto path_class_loader = JNI_FindClass(env, "dalvik/system/PathClassLoader");
+    if (!path_class_loader) {
+        LOGE("Failed to find PathClassLoader");
+        return false;
     }
-    if (!load_class) {
+    if (path_class_loader_init = JNI_GetMethodID(env, path_class_loader, "<init>",
+                                                 "(Ljava/lang/String;Ljava/lang/ClassLoader;)V");
+        !path_class_loader_init) {
+        LOGE("Failed to find PathClassLoader.<init>");
+        return false;
+    }
+    auto dex_file_class = JNI_FindClass(env, "dalvik/system/DexFile");
+    if (!dex_file_class) {
+        LOGE("Failed to find DexFile");
+        return false;
+    }
+    if (sdk_int >= __ANDROID_API_Q__) {
+        dex_file_init_with_cl = JNI_GetMethodID(
+            env, dex_file_class, "<init>",
+            "([Ljava/nio/ByteBuffer;Ljava/lang/ClassLoader;[Ldalvik/system/DexPathList$Element;)V");
+    } else if (sdk_int >= __ANDROID_API_O__) {
+        dex_file_init = JNI_GetMethodID(env, dex_file_class, "<init>", "(Ljava/nio/ByteBuffer;)V");
+    }
+    if (sdk_int >= __ANDROID_API_O__ && !dex_file_init_with_cl && !dex_file_init) {
+        LOGE("Failed to find DexFile.<init>");
+        return false;
+    }
+    if (load_class =
+            JNI_GetMethodID(env, dex_file_class, "loadClass",
+                            "(Ljava/lang/String;Ljava/lang/ClassLoader;)Ljava/lang/Class;");
+        !load_class) {
         LOGE("Failed to find a suitable way to load class");
         return false;
     }
@@ -289,6 +300,58 @@ bool InitNative(JNIEnv *env, const HookHandler &handler) {
     return true;
 }
 
+struct JavaDebuggableGuard {
+    JavaDebuggableGuard() {
+        while (true) {
+            size_t expected = 0;
+            if (count.compare_exchange_strong(expected, 1, std::memory_order_acq_rel,
+                                              std::memory_order_acquire)) {
+                Runtime::Current()->SetJavaDebuggable(
+                    Runtime::RuntimeDebugState::kJavaDebuggableAtInit);
+                count.fetch_add(1, std::memory_order_release);
+                count.notify_all();
+                break;
+            }
+            if (expected == 1) {
+                count.wait(expected, std::memory_order_acquire);
+                continue;
+            }
+            if (count.compare_exchange_strong(expected, expected + 1, std::memory_order_acq_rel,
+                                              std::memory_order_relaxed)) {
+                break;
+            }
+        }
+    }
+
+    ~JavaDebuggableGuard() {
+        while (true) {
+            size_t expected = 2;
+            if (count.compare_exchange_strong(expected, 1, std::memory_order_acq_rel,
+                                              std::memory_order_acquire)) {
+                Runtime::Current()->SetJavaDebuggable(
+                    Runtime::RuntimeDebugState::kNonJavaDebuggable);
+                count.fetch_sub(1, std::memory_order_release);
+                count.notify_all();
+                break;
+            }
+            if (expected == 1) {
+                count.wait(expected, std::memory_order_acquire);
+                continue;
+            }
+            if (count.compare_exchange_strong(expected, expected - 1, std::memory_order_acq_rel,
+                                              std::memory_order_relaxed)) {
+                break;
+            }
+        }
+    }
+
+private:
+    inline static std::atomic_size_t count{0};
+    static_assert(std::atomic_size_t::is_always_lock_free, "Unsupported architecture");
+    static_assert(std::is_same_v<std::atomic_size_t::value_type, size_t>,
+                  "Unsupported architecture");
+};
+
 std::tuple<jclass, jfieldID, jmethodID, jmethodID> BuildDex(JNIEnv *env, jobject class_loader,
                                                             std::string_view shorty, bool is_static,
                                                             std::string_view method_name,
@@ -306,7 +369,6 @@ std::tuple<jclass, jfieldID, jmethodID, jmethodID> BuildDex(JNIEnv *env, jobject
 
     auto parameter_types = std::vector<TypeDescriptor>();
     parameter_types.reserve(shorty.size() - 1);
-    std::string storage;
     auto return_type =
         shorty[0] == 'L' ? TypeDescriptor::Object : TypeDescriptor::FromDescriptor(shorty[0]);
     if (!is_static) parameter_types.push_back(TypeDescriptor::Object);  // this object
@@ -383,17 +445,19 @@ std::tuple<jclass, jfieldID, jmethodID, jmethodID> BuildDex(JNIEnv *env, jobject
 
     jclass target_class = nullptr;
 
-    if (in_memory_class_loader_init) [[likely]] {
-        auto dex_buffer = JNI_NewDirectByteBuffer(env, const_cast<void *>(image.ptr()),
-                                                  static_cast<jlong>(image.size()));
-        auto my_cl = JNI_NewObject(env, in_memory_class_loader, in_memory_class_loader_init,
-                                   dex_buffer, class_loader);
-        if (my_cl) {
-            target_class = JNI_Cast<jclass>(JNI_CallObjectMethod(
-                                                env, my_cl, load_class,
-                                                JNI_NewStringUTF(env, generated_class_name.data())))
-                               .release();
-        }
+    ScopedLocalRef<jobject> java_dex_file{nullptr};
+
+    if (auto dex_file_class = JNI_FindClass(env, "dalvik/system/DexFile"); dex_file_init_with_cl) {
+        java_dex_file = JNI_NewObject(
+            env, dex_file_class, dex_file_init_with_cl,
+            JNI_NewObjectArray(
+                env, 1, JNI_FindClass(env, "java/nio/ByteBuffer"),
+                JNI_NewDirectByteBuffer(env, const_cast<void *>(image.ptr()), image.size())),
+            nullptr, nullptr);
+    } else if (dex_file_init) {
+        java_dex_file = JNI_NewObject(
+            env, dex_file_class, dex_file_init,
+            JNI_NewDirectByteBuffer(env, const_cast<void *>(image.ptr()), image.size()));
     } else {
         void *target =
             mmap(nullptr, image.size(), PROT_WRITE | PROT_READ, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
@@ -405,16 +469,20 @@ std::tuple<jclass, jfieldID, jmethodID, jmethodID> BuildDex(JNIEnv *env, jobject
             &err_msg);
         if (!dex) {
             LOGE("Failed to open memory dex: %s", err_msg.data());
+        } else {
+            java_dex_file = WrapScope(env, dex ? dex->ToJavaDexFile(env) : jobject{nullptr});
         }
-        auto java_dex_file = WrapScope(env, dex ? dex->ToJavaDexFile(env) : jobject{nullptr});
-        if (dex && java_dex_file) {
-            auto p = JNI_NewObject(env, path_class_loader, path_class_loader_init,
+    }
+
+    if (auto path_class_loader = JNI_FindClass(env, "dalvik/system/PathClassLoader");
+        java_dex_file) {
+        auto my_cl = JNI_NewObject(env, path_class_loader, path_class_loader_init,
                                    JNI_NewStringUTF(env, ""), class_loader);
-            target_class = JNI_Cast<jclass>(JNI_CallObjectMethod(
-                                                env, java_dex_file, load_class,
-                                                env->NewStringUTF(generated_class_name.data()), p))
-                               .release();
-        }
+        target_class =
+            JNI_Cast<jclass>(
+                JNI_CallObjectMethod(env, java_dex_file, load_class,
+                                     JNI_NewStringUTF(env, generated_class_name.data()), my_cl))
+                .release();
     }
 
     if (target_class) {
@@ -601,7 +669,6 @@ std::string GetProxyMethodShorty(JNIEnv *env, jobject proxy_method) {
     }
     return out;
 }
-
 }  // namespace
 
 inline namespace v2 {
@@ -706,28 +773,20 @@ using ::lsplant::IsHooked;
     auto *target = ArtMethod::FromReflectedMethod(env, target_method);
     jobject reflected_backup = nullptr;
     art::ArtMethod *backup = nullptr;
-    {
-        std::unique_lock lk(hooked_methods_lock_);
-        if (auto it = hooked_methods_.find(target); it != hooked_methods_.end()) [[likely]] {
-            std::tie(reflected_backup, backup) = it->second;
-            if (reflected_backup == nullptr) {
-                LOGE("Unable to unhook a method that is not hooked");
-                return false;
-            }
-            hooked_methods_.erase(it->second.second);
-            hooked_methods_.erase(it);
-        }
+    if (!hooked_methods_.erase_if(target, [&reflected_backup, &backup](const auto &it) {
+            std::tie(reflected_backup, backup) = it.second;
+            return reflected_backup != nullptr;
+        })) {
+        LOGE("Unable to unhook a method that is not hooked");
+        return false;
     }
-    {
-        std::unique_lock lk(hooked_classes_lock_);
-        if (auto it = hooked_classes_.find(target->GetDeclaringClass()->GetClassDef());
-            it != hooked_classes_.end()) {
-            it->second.erase(target);
-            if (it->second.empty()) {
-                hooked_classes_.erase(it);
-            }
-        }
-    }
+    // FIXME: not atomic, but should be fine
+    hooked_methods_.erase(backup);
+    hooked_classes_.erase_if(target->GetDeclaringClass()->GetClassDef(), [&target](auto &it) {
+        it.second.erase(target);
+        return it.second.empty();
+    });
+
     env->DeleteGlobalRef(reflected_backup);
     return DoUnHook(target, backup);
 }
@@ -790,15 +849,7 @@ using ::lsplant::IsHooked;
 }
 
 [[maybe_unused]] bool MakeDexFileTrusted(JNIEnv *env, jobject cookie) {
-    struct Guard {
-        Guard() {
-            Runtime::Current()->SetJavaDebuggable(
-                Runtime::RuntimeDebugState::kJavaDebuggableAtInit);
-        }
-        ~Guard() {
-            Runtime::Current()->SetJavaDebuggable(Runtime::RuntimeDebugState::kNonJavaDebuggable);
-        }
-    } guard;
+    JavaDebuggableGuard guard;
     if (!cookie) return false;
     return DexFile::SetTrusted(env, cookie);
 }

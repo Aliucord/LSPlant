@@ -15,6 +15,16 @@ private:
         }
     }
 
+    CREATE_HOOK_STUB_ENTRY(
+            "_ZN3art11ClassLinker30ShouldUseInterpreterEntrypointEPNS_9ArtMethodEPKv", bool,
+            ShouldUseInterpreterEntrypoint, (ArtMethod * art_method, const void *quick_code), {
+                if (quick_code != nullptr && IsHooked(art_method)) [[unlikely]] {
+                    return false;
+                }
+                return backup(art_method, quick_code);
+            });
+
+
     CREATE_FUNC_SYMBOL_ENTRY(void, art_quick_to_interpreter_bridge, void *) {}
 
     CREATE_FUNC_SYMBOL_ENTRY(void, art_quick_generic_jni_trampoline, void *) {}
@@ -69,17 +79,19 @@ private:
         for (const auto &[art_method, old_trampoline] : methods) {
             auto new_trampoline = art_method->GetEntryPoint();
             art_method->SetEntryPoint(old_trampoline);
-            if (IsDeoptimized(art_method)) {
-                if (new_trampoline != old_trampoline) [[unlikely]] {
-                    LOGV("prevent deoptimized method %s from being overwritten",
-                         art_method->PrettyMethod(true).data());
-                }
-                continue;
-            }
-            if (auto backup_method = IsHooked(art_method); backup_method) [[likely]] {
-                if (new_trampoline != old_trampoline) [[unlikely]] {
-                    LOGV("propagate entrypoint for %s", backup_method->PrettyMethod(true).data());
+            auto deoptimized = IsDeoptimized(art_method);
+            auto backup_method = IsHooked(art_method);
+            if (backup_method) {
+                // If deoptimized, the backup entrypoint should be already set to interpreter
+                if (!deoptimized && new_trampoline != old_trampoline) [[unlikely]] {
+                    LOGV("propagate entrypoint for orig %p backup %p", art_method, backup_method);
                     backup_method->SetEntryPoint(new_trampoline);
+                }
+            } else if (deoptimized) {
+                if (new_trampoline != art_quick_to_interpreter_bridge &&
+                    new_trampoline != art_quick_generic_jni_trampoline) {
+                    LOGV("re-deoptimize for %p", art_method);
+                    SetEntryPointsToInterpreter(art_method);
                 }
             }
         }
@@ -108,14 +120,28 @@ private:
                                });
 
     CREATE_MEM_HOOK_STUB_ENTRY(
-        "_ZN3art11ClassLinker26VisiblyInitializedCallback29AdjustThreadVisibilityCounterEPNS_6ThreadEl",
+        LP_SELECT(
+            "_ZN3art11ClassLinker26VisiblyInitializedCallback29AdjustThreadVisibilityCounterEPNS_6ThreadEi",
+            "_ZN3art11ClassLinker26VisiblyInitializedCallback29AdjustThreadVisibilityCounterEPNS_6ThreadEl"),
         void, AdjustThreadVisibilityCounter, (void *thiz, art::Thread *self, ssize_t adjustment), {
             backup(thiz, self, adjustment);
             RestoreBackup(nullptr, self);
         });
 
+    CREATE_MEM_HOOK_STUB_ENTRY(
+        "_ZN3art11ClassLinker26VisiblyInitializedCallback22MarkVisiblyInitializedEPNS_6ThreadE",
+        void, MarkVisiblyInitialized, (void *thiz, Thread* self), {
+            backup(thiz, self);
+            RestoreBackup(nullptr, self);
+        });
 public:
     static bool Init(const HookHandler &handler) {
+        int sdk_int = GetAndroidApiLevel();
+
+        if (sdk_int >= __ANDROID_API_N__ && sdk_int < __ANDROID_API_T__) {
+            HookSyms(handler, ShouldUseInterpreterEntrypoint);
+        }
+
         if (!HookSyms(handler, FixupStaticTrampolinesWithThread, FixupStaticTrampolines,
                       FixupStaticTrampolinesRaw)) {
             return false;
@@ -128,11 +154,11 @@ public:
             return false;
         }
 
-        int sdk_int = GetAndroidApiLevel();
-
         if (sdk_int >= __ANDROID_API_R__) {
-            // fixup static trampoline may have been inlined
-            HookSyms(handler, AdjustThreadVisibilityCounter);
+            if constexpr (GetArch() != Arch::kX86 && GetArch() != Arch::kX86_64) {
+                // fixup static trampoline may have been inlined
+                HookSyms(handler, AdjustThreadVisibilityCounter, MarkVisiblyInitialized);
+            }
         }
 
         if (!RETRIEVE_MEM_FUNC_SYMBOL(
