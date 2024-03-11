@@ -1,5 +1,4 @@
 plugins {
-    alias(libs.plugins.lsplugin.publish)
 }
 
 val androidTargetSdkVersion by extra(34)
