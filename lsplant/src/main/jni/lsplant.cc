@@ -786,6 +786,7 @@ using ::lsplant::IsHooked;
         it.second.erase(target);
         return it.second.empty();
     });
+
     env->DeleteGlobalRef(reflected_backup);
     return DoUnHook(target, backup);
 }
