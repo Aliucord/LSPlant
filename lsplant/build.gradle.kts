@@ -177,7 +177,7 @@ publish {
                 setUrl("https://maven.aliucord.com/snapshots")
             }
         } else {
-            mavenLocal()
+            //mavenLocal()
         }
     }
     dependencies {
