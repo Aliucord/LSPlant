@@ -2,6 +2,7 @@
 #include <lsplant.hpp>
 #include <sys/mman.h>
 #include "logging.h"
+#include "elf_util.h"
 
 #define _uintval(p)               reinterpret_cast<uintptr_t>(p)
 #define _ptr(p)                   reinterpret_cast<void *>(p)
