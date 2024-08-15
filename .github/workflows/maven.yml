@@ -17,11 +17,16 @@ jobs:
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
+          distribution: 'temurin'
           java-version: '17'
           cache: 'gradle'
+      - uses: seanmiddleditch/gha-setup-ninja@master
+        with:
+          version: 1.12.0
       - name: Build with Gradle
-        run: ./gradlew :lsplant:publish
+        run: |
+          rm -rf $ANDROID_HOME/cmake
+          ./gradlew :lsplant:publish
         env:
           MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
           MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}

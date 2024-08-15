@@ -1,32 +1,41 @@
-#include "lsplant.hpp"
-
 #include <android/api-level.h>
+#include <bits/sysconf.h>
+#include <jni.h>
 #include <sys/mman.h>
 #include <sys/system_properties.h>
 
 #include <array>
 #include <atomic>
+#include <bit>
+#include <string_view>
+#include <tuple>
 
-#include "art/mirror/class.hpp"
-#include "art/runtime/art_method.hpp"
-#include "art/runtime/class_linker.hpp"
-#include "art/runtime/dex_file.hpp"
-#include "art/runtime/gc/scoped_gc_critical_section.hpp"
-#include "art/runtime/instrumentation.hpp"
-#include "art/runtime/jit/jit_code_cache.hpp"
-#include "art/runtime/jni/jni_id_manager.h"
-#include "art/runtime/runtime.hpp"
-#include "art/runtime/thread.hpp"
-#include "art/runtime/thread_list.hpp"
-#include "common.hpp"
-#include "dex_builder.h"
-#include "utils/jni_helper.hpp"
+#include "logging.hpp"
+
+import dex_builder;
+import lsplant;
+
+import common;
+import art_method;
+import clazz;
+import thread;
+import instrumentation;
+import runtime;
+import thread_list;
+import class_linker;
+import scope_gc_critical_section;
+import jit_code_cache;
+import jni_id_manager;
+import dex_file;
+import jit;
+import hook_helper;
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunknown-pragmas"
 #pragma ide diagnostic ignored "ConstantConditionsOC"
 #pragma ide diagnostic ignored "Simplify"
 #pragma ide diagnostic ignored "UnreachableCode"
+
 namespace lsplant {
 
 using art::ArtMethod;
@@ -36,10 +45,13 @@ using art::Instrumentation;
 using art::Runtime;
 using art::Thread;
 using art::gc::ScopedGCCriticalSection;
+using art::jit::Jit;
 using art::jit::JitCodeCache;
 using art::jni::JniIdManager;
 using art::mirror::Class;
 using art::thread_list::ScopedSuspendAll;
+
+using namespace std::string_view_literals;
 
 namespace {
 template <typename T, T... chars>
@@ -71,9 +83,9 @@ consteval inline auto GetTrampoline() {
     }
     if constexpr (kArch == Arch::kRiscv64) {
         return std::make_tuple(
-            "\x17\x05\x00\x00\x03\x35\xc5\x00\x67\x00\x05\x00\x78\x56\x34\x12\x78\x56\x34\x12"_uarr,
+            "\x17\x05\x00\x00\x03\x35\x05\x01\x83\x3f\x05\x00\x67\x80\x0f\x00\x78\x56\x34\x12\x78\x56\x34\x12"_uarr,
             // NOLINTNEXTLINE
-            uint8_t{84u}, uintptr_t{12u});
+            uint8_t{84u}, uintptr_t{16u});
     }
 }
 
@@ -242,9 +254,6 @@ inline void UpdateTrampoline(uint8_t offset) {
 }
 
 bool InitNative(JNIEnv *env, const HookHandler &handler) {
-    if (!handler.inline_hooker || !handler.inline_unhooker || !handler.art_symbol_resolver) {
-        return false;
-    }
     if (!ArtMethod::Init(env, handler)) {
         LOGE("Failed to init art method");
         return false;
@@ -272,6 +281,10 @@ bool InitNative(JNIEnv *env, const HookHandler &handler) {
     }
     if (!JitCodeCache::Init(handler)) {
         LOGE("Failed to init jit code cache");
+        return false;
+    }
+    if (!Jit::Init(handler)) {
+        LOGE("Failed to init jit");
         return false;
     }
     if (!DexFile::Init(env, handler)) {
@@ -388,7 +401,7 @@ std::tuple<jclass, jfieldID, jmethodID, jmethodID> BuildDex(JNIEnv *env, jobject
                              .Encode();
 
     auto hook_builder{cbuilder.CreateMethod(
-        generated_method_name == "{target}" ? method_name.data() : generated_method_name,
+        generated_method_name == "{target}"sv ? method_name.data() : generated_method_name,
         Prototype{return_type, parameter_types})};
     // allocate tmp first because of wide
     auto tmp{hook_builder.AllocRegister()};
@@ -435,7 +448,6 @@ std::tuple<jclass, jfieldID, jmethodID, jmethodID> BuildDex(JNIEnv *env, jobject
         backup_builder.BuildReturn(zero, /*is_object=*/false, true);
     } else {
         LiveRegister zero = backup_builder.AllocRegister();
-        LiveRegister zero_wide = backup_builder.AllocRegister();
         backup_builder.BuildConst(zero, 0);
         backup_builder.BuildReturn(zero, /*is_object=*/!return_type.is_primitive(), false);
     }
@@ -465,12 +477,12 @@ std::tuple<jclass, jfieldID, jmethodID, jmethodID> BuildDex(JNIEnv *env, jobject
         mprotect(target, image.size(), PROT_READ);
         std::string err_msg;
         const auto *dex = DexFile::OpenMemory(
-            target, image.size(), generated_source_name.empty() ? "lsplant" : generated_source_name,
-            &err_msg);
+            reinterpret_cast<const uint8_t *>(target), image.size(),
+            generated_source_name.empty() ? "lsplant" : generated_source_name, &err_msg);
         if (!dex) {
             LOGE("Failed to open memory dex: %s", err_msg.data());
         } else {
-            java_dex_file = WrapScope(env, dex ? dex->ToJavaDexFile(env) : jobject{nullptr});
+            java_dex_file = ScopedLocalRef(env, dex ? dex->ToJavaDexFile(env) : nullptr);
         }
     }
 
@@ -504,7 +516,8 @@ static_assert(std::endian::native == std::endian::little, "Unsupported architect
 union Trampoline {
 public:
     uintptr_t address;
-    unsigned count : 12;
+    unsigned count4k : 12;
+    unsigned count16k : 14;
 };
 
 static_assert(sizeof(Trampoline) == sizeof(uintptr_t), "Unsupported architecture");
@@ -513,16 +526,16 @@ static_assert(std::atomic_uintptr_t::is_always_lock_free, "Unsupported architect
 std::atomic_uintptr_t trampoline_pool{0};
 std::atomic_flag trampoline_lock{false};
 constexpr size_t kTrampolineSize = RoundUpTo(sizeof(trampoline), kPointerSize);
-constexpr size_t kPageSize = 4096;  // assume
-constexpr size_t kTrampolineNumPerPage = kPageSize / kTrampolineSize;
 constexpr uintptr_t kAddressMask = 0xFFFU;
 
 void *GenerateTrampolineFor(art::ArtMethod *hook) {
+    static const size_t kPageSize = sysconf(_SC_PAGESIZE);  // assume
+    static const size_t kTrampolineNumPerPage = kPageSize / kTrampolineSize;
     unsigned count;
     uintptr_t address;
     while (true) {
         auto tl = Trampoline{.address = trampoline_pool.fetch_add(1, std::memory_order_release)};
-        count = tl.count;
+        count = kPageSize == 16384 ? tl.count16k : tl.count4k;
         address = tl.address & ~kAddressMask;
         if (address == 0 || count >= kTrampolineNumPerPage) {
             if (trampoline_lock.test_and_set(std::memory_order_acq_rel)) {
@@ -540,7 +553,7 @@ void *GenerateTrampolineFor(art::ArtMethod *hook) {
             }
             count = 0;
             tl.address = address;
-            tl.count = count + 1;
+            kPageSize == 16384 ? tl.count16k = count + 1 : tl.count4k = count + 1;
             trampoline_pool.store(tl.address, std::memory_order_release);
             trampoline_lock.clear(std::memory_order_release);
             trampoline_lock.notify_all();
@@ -574,17 +587,11 @@ bool DoHook(ArtMethod *target, ArtMethod *hook, ArtMethod *backup) {
     } else {
         LOGV("Generated trampoline %p", entrypoint);
 
-        target->SetNonCompilable();
         hook->SetNonCompilable();
 
-        // copy after setNonCompilable
-        backup->CopyFrom(target);
-
-        target->ClearFastInterpretFlag();
+        target->BackupTo(backup);
 
         target->SetEntryPoint(entrypoint);
-
-        if (!backup->IsStatic()) backup->SetPrivate();
 
         LOGV("Done hook: target(%p:0x%x) -> %p; backup(%p:0x%x) -> %p; hook(%p:0x%x) -> %p", target,
              target->GetAccessFlags(), target->GetEntryPoint(), backup, backup->GetAccessFlags(),
@@ -652,15 +659,15 @@ std::string GetProxyMethodShorty(JNIEnv *env, jobject proxy_method) {
 
     std::string out;
     auto type_to_shorty = [&](const ScopedLocalRef<jobject> &type) {
-        if (env->IsSameObject(type, int_type)) return 'I';
-        if (env->IsSameObject(type, long_type)) return 'J';
-        if (env->IsSameObject(type, float_type)) return 'F';
-        if (env->IsSameObject(type, double_type)) return 'D';
-        if (env->IsSameObject(type, boolean_type)) return 'Z';
-        if (env->IsSameObject(type, byte_type)) return 'B';
-        if (env->IsSameObject(type, char_type)) return 'C';
-        if (env->IsSameObject(type, short_type)) return 'S';
-        if (env->IsSameObject(type, void_type)) return 'V';
+        if (JNI_IsSameObject(env, type, int_type)) return 'I';
+        if (JNI_IsSameObject(env, type, long_type)) return 'J';
+        if (JNI_IsSameObject(env, type, float_type)) return 'F';
+        if (JNI_IsSameObject(env, type, double_type)) return 'D';
+        if (JNI_IsSameObject(env, type, boolean_type)) return 'Z';
+        if (JNI_IsSameObject(env, type, byte_type)) return 'B';
+        if (JNI_IsSameObject(env, type, char_type)) return 'C';
+        if (JNI_IsSameObject(env, type, short_type)) return 'S';
+        if (JNI_IsSameObject(env, type, void_type)) return 'V';
         return 'L';
     };
     out += type_to_shorty(return_type);
@@ -676,6 +683,10 @@ inline namespace v2 {
 using ::lsplant::IsHooked;
 
 [[maybe_unused]] bool Init(JNIEnv *env, const InitInfo &info) {
+    if (!info.inline_hooker || !info.inline_unhooker || !info.art_symbol_resolver ||
+        !info.art_symbol_prefix_resolver) {
+        return false;
+    }
     bool static kInit = InitConfig(info) && InitJNI(env) && InitNative(env, info);
     return kInit;
 }
@@ -728,7 +739,7 @@ using ::lsplant::IsHooked;
         }
         std::tie(built_class, hooker_field, hook_method, backup_method) = WrapScope(
             env,
-            BuildDex(env, callback_class_loader,
+            BuildDex(env, callback_class_loader.get(),
                      __builtin_expect(is_proxy, 0) ? GetProxyMethodShorty(env, target_method)
                                                    : ArtMethod::GetMethodShorty(env, target_method),
                      is_static, target->IsConstructor() ? "constructor" : target_method_name.get(),
@@ -744,8 +755,8 @@ using ::lsplant::IsHooked;
 
     JNI_CallVoidMethod(env, reflected_backup, set_accessible, JNI_TRUE);
 
-    auto *hook = ArtMethod::FromReflectedMethod(env, reflected_hook);
-    auto *backup = ArtMethod::FromReflectedMethod(env, reflected_backup);
+    auto *hook = ArtMethod::FromReflectedMethod(env, reflected_hook.get());
+    auto *backup = ArtMethod::FromReflectedMethod(env, reflected_backup.get());
 
     JNI_SetStaticObjectField(env, built_class, hooker_field, hooker_object);
 

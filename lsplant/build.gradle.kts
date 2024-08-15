@@ -77,8 +77,8 @@ cmaker {
         val flags = arrayOf(
             "-Werror",
             "-Wno-gnu-string-literal-operator-template",
-            "-Wno-c++2b-extensions",
         )
+        abiFilters("armeabi-v7a", "arm64-v8a", "x86", "x86_64", "riscv64")
         cppFlags += flags
         cFlags += flags
     }
@@ -86,10 +86,12 @@ cmaker {
         when (it.name) {
             "debug", "release" -> {
                 arguments += "-DANDROID_STL=c++_shared"
+                arguments += "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
             }
             "standalone" -> {
                 arguments += "-DANDROID_STL=none"
                 arguments += "-DLSPLANT_STANDALONE=ON"
+                arguments += "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
             }
         }
         arguments += "-DDEBUG_SYMBOLS_PATH=${project.layout.buildDirectory.file("symbols/${it.name}").get().asFile.absolutePath}"
@@ -103,15 +105,15 @@ dependencies {
 val symbolsReleaseTask = tasks.register<Jar>("generateReleaseSymbolsJar") {
     from(project.layout.buildDirectory.file("symbols/release"))
     exclude("**/dex_builder")
-    archiveClassifier.set("symbols")
-    archiveBaseName.set("release")
+    archiveClassifier = "symbols"
+    archiveBaseName = "release"
 }
 
 val symbolsStandaloneTask = tasks.register<Jar>("generateStandaloneSymbolsJar") {
     from(project.layout.buildDirectory.file("symbols/standalone"))
     exclude("**/dex_builder")
-    archiveClassifier.set("symbols")
-    archiveBaseName.set("standalone")
+    archiveClassifier = "symbols"
+    archiveBaseName = "standalone"
 }
 
 val repo = jgit.repo(true)
@@ -135,8 +137,8 @@ publishing {
                 }
                 developers {
                     developer {
-                        name.set("Lsposed")
-                        url.set("https://lsposed.org")
+                        name = "Lsposed"
+                        url = "https://lsposed.org"
                     }
                 }
                 scm {
@@ -177,8 +179,5 @@ publishing {
         } else {
             //mavenLocal()
         }
-    }
-    dependencies {
-        "standaloneCompileOnly"("dev.rikka.ndk.thirdparty:cxx:1.2.0")
     }
 }
