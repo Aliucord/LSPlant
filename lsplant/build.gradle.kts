@@ -124,7 +124,7 @@ publishing {
     publications {
         fun MavenPublication.setup() {
             group = "org.lsposed.lsplant"
-            version = "6.3-aliucord.1"
+            version = "6.4-aliucord.1"
             pom {
                 name.set("LSPlant")
                 description.set("A hook framework for Android Runtime (ART)")
