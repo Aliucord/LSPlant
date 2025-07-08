@@ -1,3 +1,7 @@
+module;
+
+#include "lsplant.hpp"
+
 #include <android/api-level.h>
 #include <bits/sysconf.h>
 #include <jni.h>
@@ -12,29 +16,23 @@
 
 #include "logging.hpp"
 
+module lsplant;
+
 import dex_builder;
-import lsplant;
 
-import common;
-import art_method;
-import clazz;
-import thread;
-import instrumentation;
-import runtime;
-import thread_list;
-import class_linker;
-import scope_gc_critical_section;
-import jit_code_cache;
-import jni_id_manager;
-import dex_file;
-import jit;
-import hook_helper;
-
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunknown-pragmas"
-#pragma ide diagnostic ignored "ConstantConditionsOC"
-#pragma ide diagnostic ignored "Simplify"
-#pragma ide diagnostic ignored "UnreachableCode"
+import :common;
+import :art_method;
+import :clazz;
+import :thread;
+import :instrumentation;
+import :runtime;
+import :thread_list;
+import :class_linker;
+import :scope_gc_critical_section;
+import :jit_code_cache;
+import :jni_id_manager;
+import :dex_file;
+import :jit;
 
 namespace lsplant {
 
@@ -50,6 +48,7 @@ using art::jit::JitCodeCache;
 using art::jni::JniIdManager;
 using art::mirror::Class;
 using art::thread_list::ScopedSuspendAll;
+using art::JavaDebuggableGuard;
 
 using namespace std::string_view_literals;
 
@@ -263,12 +262,16 @@ bool InitNative(JNIEnv *env, const HookHandler &handler) {
         LOGE("Failed to init thread");
         return false;
     }
-    if (!ClassLinker::Init(handler)) {
-        LOGE("Failed to init class linker");
-        return false;
-    }
     if (!Class::Init(handler)) {
         LOGE("Failed to init mirror class");
+        return false;
+    }
+    if (!Runtime::Init(handler)) {
+        LOGE("Failed to init runtime");
+        return false;
+    }
+    if (!ClassLinker::Init(env, handler)) {
+        LOGE("Failed to init class linker");
         return false;
     }
     if (!ScopedSuspendAll::Init(handler)) {
@@ -299,10 +302,6 @@ bool InitNative(JNIEnv *env, const HookHandler &handler) {
         LOGE("Failed to init jni id manager");
         return false;
     }
-    if (!Runtime::Init(handler)) {
-        LOGE("Failed to init runtime");
-        return false;
-    }
 
     // This should always be the last one
     if (IsJavaDebuggable(env)) {
@@ -312,58 +311,6 @@ bool InitNative(JNIEnv *env, const HookHandler &handler) {
     }
     return true;
 }
-
-struct JavaDebuggableGuard {
-    JavaDebuggableGuard() {
-        while (true) {
-            size_t expected = 0;
-            if (count.compare_exchange_strong(expected, 1, std::memory_order_acq_rel,
-                                              std::memory_order_acquire)) {
-                Runtime::Current()->SetJavaDebuggable(
-                    Runtime::RuntimeDebugState::kJavaDebuggableAtInit);
-                count.fetch_add(1, std::memory_order_release);
-                count.notify_all();
-                break;
-            }
-            if (expected == 1) {
-                count.wait(expected, std::memory_order_acquire);
-                continue;
-            }
-            if (count.compare_exchange_strong(expected, expected + 1, std::memory_order_acq_rel,
-                                              std::memory_order_relaxed)) {
-                break;
-            }
-        }
-    }
-
-    ~JavaDebuggableGuard() {
-        while (true) {
-            size_t expected = 2;
-            if (count.compare_exchange_strong(expected, 1, std::memory_order_acq_rel,
-                                              std::memory_order_acquire)) {
-                Runtime::Current()->SetJavaDebuggable(
-                    Runtime::RuntimeDebugState::kNonJavaDebuggable);
-                count.fetch_sub(1, std::memory_order_release);
-                count.notify_all();
-                break;
-            }
-            if (expected == 1) {
-                count.wait(expected, std::memory_order_acquire);
-                continue;
-            }
-            if (count.compare_exchange_strong(expected, expected - 1, std::memory_order_acq_rel,
-                                              std::memory_order_relaxed)) {
-                break;
-            }
-        }
-    }
-
-private:
-    inline static std::atomic_size_t count{0};
-    static_assert(std::atomic_size_t::is_always_lock_free, "Unsupported architecture");
-    static_assert(std::is_same_v<std::atomic_size_t::value_type, size_t>,
-                  "Unsupported architecture");
-};
 
 std::tuple<jclass, jfieldID, jmethodID, jmethodID> BuildDex(JNIEnv *env, jobject class_loader,
                                                             std::string_view shorty, bool is_static,
@@ -587,9 +534,9 @@ bool DoHook(ArtMethod *target, ArtMethod *hook, ArtMethod *backup) {
     } else {
         LOGV("Generated trampoline %p", entrypoint);
 
-        hook->SetNonCompilable();
-
         target->BackupTo(backup);
+
+        target->SetNonCompilable();
 
         target->SetEntryPoint(entrypoint);
 
@@ -679,6 +626,7 @@ std::string GetProxyMethodShorty(JNIEnv *env, jobject proxy_method) {
 }  // namespace
 
 inline namespace v2 {
+extern "C++" {
 
 using ::lsplant::IsHooked;
 
@@ -822,7 +770,7 @@ using ::lsplant::IsHooked;
     if (auto *backup = IsHooked(art_method); backup) {
         art_method = backup;
     }
-    if (!art_method) {
+    if (!art_method || art_method->IsNative()) {
         return false;
     }
     return ClassLinker::SetEntryPointsToInterpreter(art_method);
@@ -864,8 +812,7 @@ using ::lsplant::IsHooked;
     if (!cookie) return false;
     return DexFile::SetTrusted(env, cookie);
 }
+}
 }  // namespace v2
 
 }  // namespace lsplant
-
-#pragma clang diagnostic pop

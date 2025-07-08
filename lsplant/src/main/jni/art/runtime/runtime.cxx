@@ -1,12 +1,13 @@
 module;
 
 #include <array>
+#include <atomic>
 
 #include "logging.hpp"
 
-export module runtime;
+export module lsplant:runtime;
 
-import common;
+import :common;
 import hook_helper;
 
 namespace lsplant::art {
@@ -29,13 +30,13 @@ public:
     };
 
 private:
-    inline static Field<"_ZN3art7Runtime9instance_E", Runtime *> instance_;
+    inline static auto instance_ = "_ZN3art7Runtime9instance_E"_sym.as<Runtime *>;
 
-    inline static MemberFunction<"_ZN3art7Runtime17SetJavaDebuggableEb", Runtime, void(bool)>
-        SetJavaDebuggable_;
-    inline static MemberFunction<"_ZN3art7Runtime20SetRuntimeDebugStateENS0_17RuntimeDebugStateE",
-                                 Runtime, void(RuntimeDebugState)>
-        SetRuntimeDebugState_;
+    inline static auto SetJavaDebuggable_ =
+            "_ZN3art7Runtime17SetJavaDebuggableEb"_sym.as<void (Runtime::*)(bool)>;
+
+    inline static auto SetRuntimeDebugState_ =
+            "_ZN3art7Runtime20SetRuntimeDebugStateENS0_17RuntimeDebugStateE"_sym.as<void (Runtime::*)(RuntimeDebugState)>;
 
     inline static size_t debug_state_offset = 0U;
 
@@ -53,12 +54,12 @@ public:
 
     static bool Init(const HookHandler &handler) {
         int sdk_int = GetAndroidApiLevel();
-        if (!handler.dlsym(instance_) || !*instance_) {
+        if (!handler(instance_) || !*instance_) {
             return false;
         }
         LOGD("runtime instance = %p", *instance_);
         if (sdk_int >= __ANDROID_API_O__) {
-            if (!handler.dlsym(SetJavaDebuggable_) && !handler.dlsym(SetRuntimeDebugState_)) {
+            if (!handler(SetJavaDebuggable_, SetRuntimeDebugState_)) {
                 return false;
             }
         }
@@ -86,5 +87,57 @@ public:
         }
         return true;
     }
+};
+
+export struct JavaDebuggableGuard {
+    JavaDebuggableGuard() {
+        while (true) {
+            size_t expected = 0;
+            if (count.compare_exchange_strong(expected, 1, std::memory_order_acq_rel,
+                                              std::memory_order_acquire)) {
+                Runtime::Current()->SetJavaDebuggable(
+                        Runtime::RuntimeDebugState::kJavaDebuggableAtInit);
+                count.fetch_add(1, std::memory_order_release);
+                count.notify_all();
+                break;
+            }
+            if (expected == 1) {
+                count.wait(expected, std::memory_order_acquire);
+                continue;
+            }
+            if (count.compare_exchange_strong(expected, expected + 1, std::memory_order_acq_rel,
+                                              std::memory_order_relaxed)) {
+                break;
+            }
+        }
+    }
+
+    ~JavaDebuggableGuard() {
+        while (true) {
+            size_t expected = 2;
+            if (count.compare_exchange_strong(expected, 1, std::memory_order_acq_rel,
+                                              std::memory_order_acquire)) {
+                Runtime::Current()->SetJavaDebuggable(
+                        Runtime::RuntimeDebugState::kNonJavaDebuggable);
+                count.fetch_sub(1, std::memory_order_release);
+                count.notify_all();
+                break;
+            }
+            if (expected == 1) {
+                count.wait(expected, std::memory_order_acquire);
+                continue;
+            }
+            if (count.compare_exchange_strong(expected, expected - 1, std::memory_order_acq_rel,
+                                              std::memory_order_relaxed)) {
+                break;
+            }
+        }
+    }
+
+private:
+    inline static std::atomic_size_t count{0};
+    static_assert(std::atomic_size_t::is_always_lock_free, "Unsupported architecture");
+    static_assert(std::is_same_v<std::atomic_size_t::value_type, size_t>,
+                  "Unsupported architecture");
 };
 }  // namespace lsplant::art
