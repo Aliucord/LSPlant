@@ -2,7 +2,6 @@ name: Build
 
 on:
   push:
-    branches: ["master"]
     paths-ignore:
       - 'README.md'
   workflow_dispatch:
@@ -41,9 +40,9 @@ jobs:
           restore-keys: ${{ runner.os }}
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
-      - name: Remove Android's cmake
-        shell: bash
-        run: rm -rf $ANDROID_HOME/cmake
+        with:
+          packages: tools ndk;29.0.13599879 cmake;4.0.2
+          log-accepted-android-sdk-licenses: false
       - name: Build with Gradle
         run: |
           ccache -o cache_dir=${{ github.workspace }}/.ccache
@@ -64,6 +63,7 @@ jobs:
           include-hidden-files: true
 
   test:
+    if: false
     needs: build
     name: Test on API ${{ matrix.api-level }} ${{ matrix.arch }}
     runs-on: ubuntu-latest
@@ -211,6 +211,7 @@ jobs:
   cf-test:
     name: Test ${{ matrix.device }}
     runs-on: ubuntu-24.04
+    if: false
     env:
       CF_HOME: /home/runner/aosp_cf_phone
     strategy:

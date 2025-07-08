@@ -18,16 +18,17 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '17'
-          cache: 'gradle'
+          java-version: '21'
       - uses: seanmiddleditch/gha-setup-ninja@master
         with:
-          version: 1.12.0
+          version: 1.12.1
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: tools ndk;29.0.13599879 cmake;4.0.2
+          log-accepted-android-sdk-licenses: false
       - name: Build with Gradle
         run: |
-          rm -rf $ANDROID_HOME/cmake
           ./gradlew :lsplant:publish
         env:
           MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
