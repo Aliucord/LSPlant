@@ -4,6 +4,7 @@
 #include <string_view>
 #include "logging.h"
 #include "elf_util.h"
+#include "lsplant.hpp"
 
 import lsplant;
 

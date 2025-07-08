@@ -175,7 +175,7 @@ public:
             handler(ShouldUseInterpreterEntrypoint_);
         }
 
-        if (handler.hook(FixupStaticTrampolinesWithThread_, FixupStaticTrampolines_,
+        if (handler(FixupStaticTrampolinesWithThread_, FixupStaticTrampolines_,
                          FixupStaticTrampolinesRaw_)) {
             method_FixupStaticTrampolines_hooked = true;
         }
@@ -190,7 +190,7 @@ public:
         if (!method_FixupStaticTrampolines_hooked && sdk_int >= __ANDROID_API_R__) {
             if constexpr (kArch != Arch::kX86 && kArch != Arch::kX86_64) {
                 // fixup static trampoline may have been inlined
-                if (!handler.hook(AdjustThreadVisibilityCounter_, MarkVisiblyInitialized_)) {
+                if (!handler(AdjustThreadVisibilityCounter_, MarkVisiblyInitialized_)) {
                     LOGW("MarkVisiblyInitialized not hooked");
                 }
             }

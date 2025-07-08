@@ -19,6 +19,7 @@
  */
 #include <malloc.h>
 #include <cstring>
+#include <cstdlib>
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <unistd.h>
