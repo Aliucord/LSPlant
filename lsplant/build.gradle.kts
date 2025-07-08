@@ -61,6 +61,10 @@ android {
     namespace = "org.lsposed.lsplant"
 
     publishing {
+        singleVariant("debug") {
+            withSourcesJar()
+            withJavadocJar()
+        }
         singleVariant("release") {
             withSourcesJar()
             withJavadocJar()
@@ -152,6 +156,13 @@ publishing {
             afterEvaluate {
                 from(components.getByName("release"))
                 artifact(symbolsReleaseTask)
+            }
+            setup()
+        }
+        register<MavenPublication>("lsplant-debug") {
+            artifactId = "lsplant-debug"
+            afterEvaluate {
+                from(components.getByName("debug"))
             }
             setup()
         }
