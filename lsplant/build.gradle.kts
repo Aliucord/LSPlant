@@ -127,7 +127,7 @@ println("${rootProject.name} version: $ver")
 publishing {
     publications {
         fun MavenPublication.setup() {
-            group = "org.lsposed.lsplant"
+            group = "com.aliucord.lsplant"
             version = "6.4-aliucord.4"
             pom {
                 name.set("LSPlant")
@@ -176,8 +176,8 @@ publishing {
         }
     }
     repositories {
-        val username = System.getenv("MAVEN_USERNAME")
-        val password = System.getenv("MAVEN_PASSWORD")
+        val username = System.getenv("MAVEN_RELEASE_USERNAME")
+        val password = System.getenv("MAVEN_RELEASE_PASSWORD")
 
         if (username != null && password != null) {
             maven {
@@ -185,7 +185,7 @@ publishing {
                     this.username = username
                     this.password = password
                 }
-                setUrl("https://maven.aliucord.com/snapshots")
+                setUrl("https://maven.aliucord.com/releases")
             }
         } else {
             //mavenLocal()
